@@ -98,13 +98,6 @@ class PoemLanguageModel(nn.Module):
         assert logits.shape == (B, T, self.vocab_size), \
             f"[PoemModel forward] logits 形状异常: 期望 ({B},{T},{self.vocab_size}), 实际 {tuple(logits.shape)}"
 
-        if not self._shape_checked:
-            print(f"  [PoemModel forward] shape 断言通过: "
-                  f"x ({B},{T}) -> emb ({B},{T},{self.embed_dim}) "
-                  f"-> rnn_out ({B},{T},{self.hidden_dim}) "
-                  f"-> logits ({B},{T},{self.vocab_size})")
-            self._shape_checked = True
-
         return logits, hidden
 
 

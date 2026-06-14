@@ -7,14 +7,9 @@ from config import (
     BEST_MODEL_SAVE_PATH,
     BATCH_SIZE,
     CHECKPOINT_DIR,
-    DROPOUT,
-    EMBED_DIM,
-    HIDDEN_DIM,
-    MODEL_TYPE,
-    NUM_EPOCHS,
-    NUM_LAYERS,
     RANDOM_SEED,
     SKIP_TRAINING,
+    build_runtime_config,
 )
 from data_utils import build_dataloaders
 from model import build_model
@@ -67,13 +62,15 @@ def main():
     print(" 2. 构建诗歌生成模型")
     print("-" * 55)
 
+    runtime_config = build_runtime_config()
+
     model = build_model(
         vocab_size=len(stoi),
-        model_type=MODEL_TYPE,
-        embed_dim=EMBED_DIM,
-        hidden_dim=HIDDEN_DIM,
-        num_layers=NUM_LAYERS,
-        dropout=DROPOUT,
+        model_type=runtime_config["model_type"],
+        embed_dim=runtime_config["embed_dim"],
+        hidden_dim=runtime_config["hidden_dim"],
+        num_layers=runtime_config["num_layers"],
+        dropout=runtime_config["dropout"],
     ).to(device)
 
     total_params, trainable_params = count_parameters(model)
@@ -97,19 +94,11 @@ def main():
     print(f"  输出 logits: {tuple(sample_logits.shape)}  (期望: ({sample_x.shape[0]}, 29, {len(stoi)}))")
     assert sample_logits.shape == (sample_x.shape[0], sample_x.shape[1], len(stoi)), \
         "[模型维度自检] logits 形状异常!"
-    print(f"[模型维度自检] assert 通过!")
 
-    config_dict = {
-        "model_type": MODEL_TYPE,
-        "embed_dim": EMBED_DIM,
-        "hidden_dim": HIDDEN_DIM,
-        "num_layers": NUM_LAYERS,
-        "dropout": DROPOUT,
-        "num_epochs": NUM_EPOCHS,
-        "batch_size": BATCH_SIZE,
-        "random_seed": RANDOM_SEED,
-        "vocab_size": len(stoi),
-    }
+    config_dict = dict(runtime_config)
+    config_dict["batch_size"] = BATCH_SIZE
+    config_dict["random_seed"] = RANDOM_SEED
+    config_dict["vocab_size"] = len(stoi)
 
     # ==========================================
     #  1.6 训练或加载最佳模型

@@ -281,10 +281,6 @@ class PoemDataset(Dataset):
         x = torch.tensor(seq[:-1], dtype=torch.long)
         y = torch.tensor(seq[1:], dtype=torch.long)
 
-        if not self._shape_checked:
-            print(f"  [PoemDataset __getitem__] shape 断言通过: x {tuple(x.shape)}, y {tuple(y.shape)}")
-            self._shape_checked = True
-
         return x, y
 
 

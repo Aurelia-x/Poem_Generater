@@ -7,11 +7,16 @@ import torch.optim as optim
 
 from config import (
     BEST_MODEL_SAVE_PATH,
+    EARLY_STOPPING_PATIENCE,
     GRAD_CLIP,
     LAST_MODEL_SAVE_PATH,
     LEARNING_RATE,
     LOG_EVERY_N_BATCHES,
     NUM_EPOCHS,
+    SCHEDULER_FACTOR,
+    SCHEDULER_MIN_LR,
+    SCHEDULER_PATIENCE,
+    WEIGHT_DECAY,
 )
 
 
@@ -98,20 +103,22 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
         optimizer.zero_grad()
         logits, _ = model(x_batch)
 
-        B, T, V = logits.shape
-        if not hasattr(train_one_epoch, "_shape_checked"):
-            print(f"  [train_one_epoch] shape 断言通过: logits ({B},{T},{V}), y ({B},{T})")
-            train_one_epoch._shape_checked = True
-
         loss = sequence_cross_entropy(logits, y_batch)
         loss.backward()
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+        grad_clip = getattr(train_one_epoch, "_current_grad_clip", GRAD_CLIP)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
 
         running_loss += loss.item()
 
-        if batch_idx == 1 or batch_idx % LOG_EVERY_N_BATCHES == 0 or batch_idx == num_batches:
+        log_every_n_batches = getattr(train_one_epoch, "_current_log_every", LOG_EVERY_N_BATCHES)
+        should_log_batch = (
+            log_every_n_batches is not None
+            and log_every_n_batches > 0
+            and (batch_idx == 1 or batch_idx % log_every_n_batches == 0 or batch_idx == num_batches)
+        )
+        if should_log_batch:
             print(f"  [Epoch {epoch:02d} | Batch {batch_idx:03d}/{num_batches:03d}] "
                   f"loss = {loss.item():.6f}, grad_norm = {float(grad_norm):.6f}")
 
@@ -149,7 +156,7 @@ def save_checkpoint(file_path, model, optimizer, epoch, history, best_val_ppl, s
         "config": config_dict,
     }, file_path)
 
-    print(f"[checkpoint] 已保存模型到: {file_path}")
+    # print(f"[checkpoint] 已保存模型到: {file_path}")
 
 
 # ==========================================
@@ -178,13 +185,37 @@ def fit(model, train_loader, val_loader, device, stoi, itos, config_dict):
     print(" 5. 训练诗歌语言模型")
     print("-" * 55)
 
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    learning_rate = config_dict.get("learning_rate", LEARNING_RATE)
+    num_epochs = config_dict.get("num_epochs", NUM_EPOCHS)
+    grad_clip = config_dict.get("grad_clip", GRAD_CLIP)
+    weight_decay = config_dict.get("weight_decay", WEIGHT_DECAY)
+    log_every_n_batches = config_dict.get("log_every_n_batches", LOG_EVERY_N_BATCHES)
+    scheduler_factor = config_dict.get("scheduler_factor", SCHEDULER_FACTOR)
+    scheduler_patience = config_dict.get("scheduler_patience", SCHEDULER_PATIENCE)
+    scheduler_min_lr = config_dict.get("scheduler_min_lr", SCHEDULER_MIN_LR)
+    early_stopping_patience = config_dict.get("early_stopping_patience", EARLY_STOPPING_PATIENCE)
+    best_model_save_path = config_dict.get("best_model_save_path", BEST_MODEL_SAVE_PATH)
+    last_model_save_path = config_dict.get("last_model_save_path", LAST_MODEL_SAVE_PATH)
+
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=scheduler_factor,
+        patience=scheduler_patience,
+        min_lr=scheduler_min_lr,
+    )
+    train_one_epoch._current_grad_clip = grad_clip
+    train_one_epoch._current_log_every = log_every_n_batches
 
     print(f"\n[训练配置]")
     print(f"  损失函数: CrossEntropyLoss (序列展平后计算)")
-    print(f"  优化器:   Adam (lr={LEARNING_RATE})")
-    print(f"  训练轮数: {NUM_EPOCHS}")
-    print(f"  梯度裁剪: {GRAD_CLIP}")
+    print(f"  优化器:   Adam (lr={learning_rate}, weight_decay={weight_decay})")
+    print(f"  最大轮数: {num_epochs}")
+    print(f"  梯度裁剪: {grad_clip}")
+    print(f"  学习率调度: ReduceLROnPlateau (factor={scheduler_factor}, patience={scheduler_patience}, min_lr={scheduler_min_lr})")
+    print(f"  提前停止: 连续 {early_stopping_patience} 轮验证集无提升则停止")
+    print(f"  Batch 内日志: {'关闭' if not log_every_n_batches or log_every_n_batches <= 0 else f'每 {log_every_n_batches} 个 batch 打印一次'}")
     print(f"  模型选择策略: 根据 val ppl 选择最佳模型，PPL 越低越好")
 
     history = {
@@ -197,38 +228,51 @@ def fit(model, train_loader, val_loader, device, stoi, itos, config_dict):
     best_val_ppl = float("inf")
     best_epoch = 0
     best_state = None
+    epochs_without_improvement = 0
 
-    print(f"\n{'Epoch':>6s}  {'Train Loss':>12s}  {'Train PPL':>12s}  {'Val Loss':>12s}  {'Val PPL':>12s}")
-    print(f"{'------':>6s}  {'----------':>12s}  {'----------':>12s}  {'--------':>12s}  {'--------':>12s}")
+    print(f"\n{'Epoch':>6s}  {'LR':>10s}  {'Train Loss':>12s}  {'Train PPL':>12s}  {'Val Loss':>12s}  {'Val PPL':>12s}")
+    print(f"{'------':>6s}  {'--------':>10s}  {'----------':>12s}  {'----------':>12s}  {'--------':>12s}  {'--------':>12s}")
 
-    for epoch in range(1, NUM_EPOCHS + 1):
+    for epoch in range(1, num_epochs + 1):
         train_loss, train_ppl = train_one_epoch(model, train_loader, optimizer, device, epoch)
         val_loss, val_ppl = evaluate_one_epoch(model, val_loader, device)
+        current_lr = optimizer.param_groups[0]["lr"]
 
         history["train_loss"].append(train_loss)
         history["train_ppl"].append(train_ppl)
         history["val_loss"].append(val_loss)
         history["val_ppl"].append(val_ppl)
 
-        if val_ppl <= best_val_ppl:
+        if val_ppl < best_val_ppl:
             best_val_ppl = val_ppl
             best_epoch = epoch
             best_state = copy.deepcopy(model.state_dict())
-            save_checkpoint(BEST_MODEL_SAVE_PATH, model, optimizer, epoch, history, best_val_ppl, stoi, itos, config_dict)
+            epochs_without_improvement = 0
+            save_checkpoint(best_model_save_path, model, optimizer, epoch, history, best_val_ppl, stoi, itos, config_dict)
+        else:
+            epochs_without_improvement += 1
 
-        print(f"{epoch:>6d}  {train_loss:>12.6f}  {train_ppl:>12.4f}  {val_loss:>12.6f}  {val_ppl:>12.4f}")
+        print(f"{epoch:>6d}  {current_lr:>10.6f}  {train_loss:>12.6f}  {train_ppl:>12.4f}  {val_loss:>12.6f}  {val_ppl:>12.4f}")
 
-    print(f"{'------':>6s}  {'----------':>12s}  {'----------':>12s}  {'--------':>12s}  {'--------':>12s}")
+        scheduler.step(val_ppl)
+
+        if epochs_without_improvement >= early_stopping_patience:
+            print(f"\n[训练] 验证集 PPL 已连续 {epochs_without_improvement} 轮没有提升，提前停止训练")
+            break
+
+    print(f"{'------':>6s}  {'--------':>10s}  {'----------':>12s}  {'----------':>12s}  {'--------':>12s}  {'--------':>12s}")
 
     assert best_state is not None, "[fit] best_state 为空，说明训练过程未正确更新最佳模型!"
 
-    save_checkpoint(LAST_MODEL_SAVE_PATH, model, optimizer, NUM_EPOCHS, history, best_val_ppl, stoi, itos, config_dict)
+    finished_epochs = len(history["train_loss"])
+    save_checkpoint(last_model_save_path, model, optimizer, finished_epochs, history, best_val_ppl, stoi, itos, config_dict)
 
     model.load_state_dict(best_state)
 
     print(f"\n[训练] 训练完成!")
+    print(f"[训练] 实际训练轮数: {finished_epochs}")
     print(f"[训练] 最佳模型来自 Epoch {best_epoch}, 最佳 Val PPL = {best_val_ppl:.4f}")
-    print(f"[训练] 最佳模型已保存到: {BEST_MODEL_SAVE_PATH}")
-    print(f"[训练] 最终模型已保存到: {LAST_MODEL_SAVE_PATH}")
+    print(f"[训练] 最佳模型已保存到: {best_model_save_path}")
+    print(f"[训练] 最终模型已保存到: {last_model_save_path}")
 
     return history, best_epoch, best_val_ppl, best_state

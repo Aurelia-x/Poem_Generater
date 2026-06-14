@@ -1,3 +1,6 @@
 docs/
+cache/
+checkpoints/
+outputs/
 __pycache__/
 *.txt
