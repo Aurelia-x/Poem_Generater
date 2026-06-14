@@ -7,6 +7,7 @@ import torch.optim as optim
 
 from config import (
     BEST_MODEL_SAVE_PATH,
+    EARLY_STOPPING_MIN_DELTA,
     EARLY_STOPPING_PATIENCE,
     GRAD_CLIP,
     LAST_MODEL_SAVE_PATH,
@@ -77,23 +78,28 @@ def evaluate_one_epoch(model, dataloader, device):
     return avg_loss, ppl
 
 
-def train_one_epoch(model, dataloader, optimizer, device, epoch):
+def train_one_epoch(model, dataloader, optimizer, device, epoch,
+                     grad_clip=GRAD_CLIP, log_every_n_batches=LOG_EVERY_N_BATCHES):
     """
     训练一个 Epoch
 
     参数:
-        model:      模型实例
-        dataloader: 训练集数据加载器
-        optimizer:  优化器
-        device:     计算设备
-        epoch:      当前 Epoch 编号
+        model:               模型实例
+        dataloader:          训练集数据加载器
+        optimizer:           优化器
+        device:              计算设备
+        epoch:               当前 Epoch 编号
+        grad_clip:           梯度裁剪阈值
+        log_every_n_batches: 每 N 个 batch 输出一次日志
 
     返回:
-        avg_loss: 平均训练损失
-        ppl:      训练集困惑度
+        avg_loss:      平均训练损失
+        ppl:           训练集困惑度
+        avg_grad_norm: 平均梯度范数
     """
     model.train()
     running_loss = 0.0
+    running_grad_norm = 0.0
     num_batches = len(dataloader)
 
     for batch_idx, (x_batch, y_batch) in enumerate(dataloader, start=1):
@@ -106,13 +112,12 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
         loss = sequence_cross_entropy(logits, y_batch)
         loss.backward()
 
-        grad_clip = getattr(train_one_epoch, "_current_grad_clip", GRAD_CLIP)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
 
         running_loss += loss.item()
+        running_grad_norm += float(grad_norm)
 
-        log_every_n_batches = getattr(train_one_epoch, "_current_log_every", LOG_EVERY_N_BATCHES)
         should_log_batch = (
             log_every_n_batches is not None
             and log_every_n_batches > 0
@@ -123,8 +128,9 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
                   f"loss = {loss.item():.6f}, grad_norm = {float(grad_norm):.6f}")
 
     avg_loss = running_loss / num_batches
+    avg_grad_norm = running_grad_norm / num_batches
     ppl = math.exp(avg_loss)
-    return avg_loss, ppl
+    return avg_loss, ppl, avg_grad_norm
 
 
 # ==========================================
@@ -181,10 +187,6 @@ def fit(model, train_loader, val_loader, device, stoi, itos, config_dict):
         best_val_ppl:  最佳验证集 PPL
         best_state:    最佳模型参数
     """
-    print("\n" + "-" * 55)
-    print(" 5. 训练诗歌语言模型")
-    print("-" * 55)
-
     learning_rate = config_dict.get("learning_rate", LEARNING_RATE)
     num_epochs = config_dict.get("num_epochs", NUM_EPOCHS)
     grad_clip = config_dict.get("grad_clip", GRAD_CLIP)
@@ -194,6 +196,7 @@ def fit(model, train_loader, val_loader, device, stoi, itos, config_dict):
     scheduler_patience = config_dict.get("scheduler_patience", SCHEDULER_PATIENCE)
     scheduler_min_lr = config_dict.get("scheduler_min_lr", SCHEDULER_MIN_LR)
     early_stopping_patience = config_dict.get("early_stopping_patience", EARLY_STOPPING_PATIENCE)
+    early_stopping_min_delta = config_dict.get("early_stopping_min_delta", EARLY_STOPPING_MIN_DELTA)
     best_model_save_path = config_dict.get("best_model_save_path", BEST_MODEL_SAVE_PATH)
     last_model_save_path = config_dict.get("last_model_save_path", LAST_MODEL_SAVE_PATH)
 
@@ -205,9 +208,6 @@ def fit(model, train_loader, val_loader, device, stoi, itos, config_dict):
         patience=scheduler_patience,
         min_lr=scheduler_min_lr,
     )
-    train_one_epoch._current_grad_clip = grad_clip
-    train_one_epoch._current_log_every = log_every_n_batches
-
     print(f"\n[训练配置]")
     print(f"  损失函数: CrossEntropyLoss (序列展平后计算)")
     print(f"  优化器:   Adam (lr={learning_rate}, weight_decay={weight_decay})")
@@ -215,7 +215,6 @@ def fit(model, train_loader, val_loader, device, stoi, itos, config_dict):
     print(f"  梯度裁剪: {grad_clip}")
     print(f"  学习率调度: ReduceLROnPlateau (factor={scheduler_factor}, patience={scheduler_patience}, min_lr={scheduler_min_lr})")
     print(f"  提前停止: 连续 {early_stopping_patience} 轮验证集无提升则停止")
-    print(f"  Batch 内日志: {'关闭' if not log_every_n_batches or log_every_n_batches <= 0 else f'每 {log_every_n_batches} 个 batch 打印一次'}")
     print(f"  模型选择策略: 根据 val ppl 选择最佳模型，PPL 越低越好")
 
     history = {
@@ -223,6 +222,8 @@ def fit(model, train_loader, val_loader, device, stoi, itos, config_dict):
         "train_ppl": [],
         "val_loss": [],
         "val_ppl": [],
+        "lr": [],
+        "grad_norm": [],
     }
 
     best_val_ppl = float("inf")
@@ -234,7 +235,7 @@ def fit(model, train_loader, val_loader, device, stoi, itos, config_dict):
     print(f"{'------':>6s}  {'--------':>10s}  {'----------':>12s}  {'----------':>12s}  {'--------':>12s}  {'--------':>12s}")
 
     for epoch in range(1, num_epochs + 1):
-        train_loss, train_ppl = train_one_epoch(model, train_loader, optimizer, device, epoch)
+        train_loss, train_ppl, avg_grad_norm = train_one_epoch(model, train_loader, optimizer, device, epoch, grad_clip, log_every_n_batches)
         val_loss, val_ppl = evaluate_one_epoch(model, val_loader, device)
         current_lr = optimizer.param_groups[0]["lr"]
 
@@ -242,8 +243,10 @@ def fit(model, train_loader, val_loader, device, stoi, itos, config_dict):
         history["train_ppl"].append(train_ppl)
         history["val_loss"].append(val_loss)
         history["val_ppl"].append(val_ppl)
+        history["lr"].append(current_lr)
+        history["grad_norm"].append(avg_grad_norm)
 
-        if val_ppl < best_val_ppl:
+        if best_val_ppl - val_ppl > early_stopping_min_delta:
             best_val_ppl = val_ppl
             best_epoch = epoch
             best_state = copy.deepcopy(model.state_dict())
@@ -269,10 +272,6 @@ def fit(model, train_loader, val_loader, device, stoi, itos, config_dict):
 
     model.load_state_dict(best_state)
 
-    print(f"\n[训练] 训练完成!")
-    print(f"[训练] 实际训练轮数: {finished_epochs}")
-    print(f"[训练] 最佳模型来自 Epoch {best_epoch}, 最佳 Val PPL = {best_val_ppl:.4f}")
-    print(f"[训练] 最佳模型已保存到: {best_model_save_path}")
-    print(f"[训练] 最终模型已保存到: {last_model_save_path}")
+    print(f"\n[训练] 完成! epochs={finished_epochs} best_epoch={best_epoch} best_val_ppl={best_val_ppl:.4f}")
 
     return history, best_epoch, best_val_ppl, best_state

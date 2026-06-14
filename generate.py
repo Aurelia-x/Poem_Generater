@@ -19,7 +19,7 @@ from data_utils import decode_ids
 from metrics import analyze_generated_poem
 from model import build_model
 from sampler import sample_next_token
-from utils import ensure_dir, get_device, set_seed
+from utils import configure_torch_runtime, ensure_dir, get_device, set_seed
 
 
 # ==========================================
@@ -287,6 +287,7 @@ def main():
     print("=" * 60)
 
     args = parse_args()
+    configure_torch_runtime()
     set_seed(args.seed)
     ensure_dir(OUTPUT_DIR)
     ensure_dir(SAMPLES_DIR)

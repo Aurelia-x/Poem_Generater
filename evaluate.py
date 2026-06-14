@@ -21,7 +21,7 @@ from generate import (
 )
 from metrics import batch_format_compliance
 from trainer import evaluate_one_epoch
-from utils import ensure_dir, get_device, save_json, set_seed
+from utils import configure_torch_runtime, ensure_dir, get_device, save_json, set_seed
 
 
 # ==========================================
@@ -124,6 +124,7 @@ def main():
     print("=" * 60)
 
     args = parse_args()
+    configure_torch_runtime()
     set_seed(RANDOM_SEED)
     ensure_dir(METRICS_DIR)
     ensure_dir(SAMPLES_DIR)

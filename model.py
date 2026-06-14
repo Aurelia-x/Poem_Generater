@@ -35,16 +35,9 @@ class PoemLanguageModel(nn.Module):
         self.dropout = dropout
         self._shape_checked = False
 
-        print(f"\n[PoemLanguageModel __init__] 开始构建诗歌生成模型...")
-        print(f"  [PoemModel] 词表大小 V = {vocab_size}")
-        print(f"  [PoemModel] 模型类型   = {self.model_type.upper()}")
-        print(f"  [PoemModel] 嵌入维度 E = {embed_dim}")
-        print(f"  [PoemModel] 隐藏维度 H = {hidden_dim}")
-        print(f"  [PoemModel] 层数       = {num_layers}")
-        print(f"  [PoemModel] dropout    = {dropout}")
+        print(f"[模型] {self.model_type.upper()} V={vocab_size} E={embed_dim} H={hidden_dim} layers={num_layers} dropout={dropout}")
 
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        print(f"  [PoemModel] Embedding 构建完成: nn.Embedding({vocab_size}, {embed_dim})")
 
         rnn_dropout = dropout if num_layers > 1 else 0.0
         if self.model_type == "lstm":
@@ -66,11 +59,7 @@ class PoemLanguageModel(nn.Module):
         else:
             raise ValueError(f"[PoemModel] 不支持的模型类型: {model_type}")
 
-        print(f"  [PoemModel] {self.model_type.upper()} 主体构建完成")
-
         self.output_layer = nn.Linear(hidden_dim, vocab_size)
-        print(f"  [PoemModel] 输出层构建完成: nn.Linear({hidden_dim}, {vocab_size})")
-        print(f"[PoemLanguageModel __init__] 诗歌生成模型构建完成")
 
     def forward(self, x, hidden=None):
         """
@@ -87,16 +76,17 @@ class PoemLanguageModel(nn.Module):
         B, T = x.shape
 
         x_emb = self.embedding(x)  # (B, T) -> (B, T, E)
-        assert x_emb.shape == (B, T, self.embed_dim), \
-            f"[PoemModel forward] Embedding 输出形状异常: 期望 ({B},{T},{self.embed_dim}), 实际 {tuple(x_emb.shape)}"
-
         rnn_out, hidden = self.rnn(x_emb, hidden)  # (B, T, H)
-        assert rnn_out.shape == (B, T, self.hidden_dim), \
-            f"[PoemModel forward] RNN 输出形状异常: 期望 ({B},{T},{self.hidden_dim}), 实际 {tuple(rnn_out.shape)}"
-
         logits = self.output_layer(rnn_out)  # (B, T, V)
-        assert logits.shape == (B, T, self.vocab_size), \
-            f"[PoemModel forward] logits 形状异常: 期望 ({B},{T},{self.vocab_size}), 实际 {tuple(logits.shape)}"
+
+        if not self._shape_checked:
+            assert x_emb.shape == (B, T, self.embed_dim), \
+                f"[forward] Embedding 形状异常: 期望 ({B},{T},{self.embed_dim}), 实际 {tuple(x_emb.shape)}"
+            assert rnn_out.shape == (B, T, self.hidden_dim), \
+                f"[forward] RNN 形状异常: 期望 ({B},{T},{self.hidden_dim}), 实际 {tuple(rnn_out.shape)}"
+            assert logits.shape == (B, T, self.vocab_size), \
+                f"[forward] logits 形状异常: 期望 ({B},{T},{self.vocab_size}), 实际 {tuple(logits.shape)}"
+            self._shape_checked = True
 
         return logits, hidden
 

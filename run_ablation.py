@@ -16,7 +16,7 @@ from generate import generate_acrostic, generate_from_first_line
 from metrics import batch_format_compliance
 from model import build_model
 from trainer import evaluate_one_epoch, fit
-from utils import count_parameters, ensure_dir, get_device, save_json, set_seed
+from utils import configure_torch_runtime, count_parameters, ensure_dir, get_device, save_json, set_seed
 
 
 # ==========================================
@@ -103,6 +103,7 @@ def main():
     print("=" * 60)
 
     ensure_dir(ABLATION_DIR)
+    configure_torch_runtime()
     set_seed(RANDOM_SEED)
 
     print("\n" + "-" * 55)

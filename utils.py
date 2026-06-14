@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import sys
 
 import numpy as np
 import torch
@@ -27,17 +28,30 @@ def set_seed(seed):
     参数:
         seed: 随机种子值
     """
-    print(f"\n[utils.set_seed] 开始设置随机种子...")
-    print(f"  [utils.set_seed] seed = {seed}")
-
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    print(f"[utils.set_seed] 随机种子设置完成")
+
+def configure_torch_runtime():
+    """
+    配置 PyTorch 运行时
+
+    说明:
+        在当前 Windows + PyTorch 2.11 + CUDA 环境下，
+        较大尺寸的 cuDNN LSTM 在进程退出时会触发原生崩溃，
+        表现为终端退出码 -1073740791。
+
+        为保证训练 / 评估 / 生成脚本稳定退出，这里统一禁用
+        cuDNN 的 RNN 路径，改用更稳定的 CUDA 实现。
+    """
+    if torch.cuda.is_available() and sys.platform.startswith("win"):
+        torch.backends.cudnn.enabled = False
+        torch.backends.cudnn.benchmark = False
 
 
 def get_device():

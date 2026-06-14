@@ -15,6 +15,7 @@ from config import (
     MIN_CHAR_FREQ,
     PAD_TOKEN,
     POEM_CHAR_LEN,
+    RANDOM_SEED,
     RAW_DATA_PATH,
     SPECIAL_TOKENS,
     TEST_RATIO,
@@ -23,7 +24,7 @@ from config import (
     VAL_RATIO,
     VOCAB_PATH,
 )
-from utils import ensure_dir, save_json
+from utils import ensure_dir, load_json, save_json, set_seed
 
 
 # ==========================================
@@ -73,17 +74,10 @@ def load_and_clean_poems(file_path=RAW_DATA_PATH, max_poems=MAX_POEMS):
     返回:
         valid_poems: 过滤后的七言绝句列表
     """
-    print("\n" + "=" * 55)
-    print(" [数据读取与清洗]")
-    print("=" * 55)
-
-    print(f"\n[数据读取] 原始文件路径: {file_path}")
     assert os.path.exists(file_path), f"[数据读取] 文件不存在: {file_path}"
 
     with open(file_path, "r", encoding="utf-8") as f:
         raw_lines = [line.rstrip("\n") for line in f]
-
-    print(f"[数据读取] 原始文本行数: {len(raw_lines)}")
 
     cleaned_poems = []
     invalid_count = 0
@@ -98,15 +92,9 @@ def load_and_clean_poems(file_path=RAW_DATA_PATH, max_poems=MAX_POEMS):
     if max_poems is not None:
         cleaned_poems = cleaned_poems[:max_poems]
 
-    print(f"[数据清洗] 满足七言绝句长度要求的样本数: {len(cleaned_poems)}")
-    print(f"[数据清洗] 被过滤的无效样本数: {invalid_count}")
-    print(f"[数据清洗] 最大使用样本数限制: {max_poems}")
+    print(f"[数据] 原始行数: {len(raw_lines)}, 有效七言绝句: {len(cleaned_poems)}, 过滤无效: {invalid_count}")
 
     assert len(cleaned_poems) > 0, "[数据清洗] 过滤后没有可用样本!"
-
-    print(f"\n[数据清洗] 前 3 首有效样本预览:")
-    for idx, poem in enumerate(cleaned_poems[:3]):
-        print(f"  样本 {idx}: {poem}  (长度={len(poem)})")
 
     return cleaned_poems
 
@@ -141,16 +129,7 @@ def build_vocab(poems, min_freq=MIN_CHAR_FREQ):
     itos = SPECIAL_TOKENS + vocab_chars
     stoi = {char: idx for idx, char in enumerate(itos)}
 
-    print(f"\n[词表] 特殊 token 数量: {len(SPECIAL_TOKENS)}")
-    print(f"[词表] 普通汉字数量:     {len(vocab_chars)}")
-    print(f"[词表] 总词表大小 V =   {len(itos)}")
-    print(f"[词表] 词频最高的前 10 个字:")
-    for char, freq in counter.most_common(10):
-        print(f"  '{char}' -> {freq}")
-
-    print(f"\n[词表] 前 15 个 token 映射预览:")
-    for idx, token in enumerate(itos[:15]):
-        print(f"  {idx:>3d} -> {token}")
+    print(f"[词表] 总大小 V = {len(itos)} (普通汉字: {len(vocab_chars)}, 特殊token: {len(SPECIAL_TOKENS)}, min_freq={min_freq})")
 
     return stoi, itos
 
@@ -220,10 +199,6 @@ def split_dataset(poems, train_ratio=TRAIN_RATIO, val_ratio=VAL_RATIO, test_rati
     返回:
         train_poems, val_poems, test_poems
     """
-    print("\n" + "=" * 55)
-    print(" [划分数据集]")
-    print("=" * 55)
-
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-8, \
         "[数据划分] train/val/test 比例之和必须为 1"
 
@@ -238,10 +213,7 @@ def split_dataset(poems, train_ratio=TRAIN_RATIO, val_ratio=VAL_RATIO, test_rati
     val_poems = poems[train_end:val_end]
     test_poems = poems[val_end:]
 
-    print(f"\n[数据划分] 总样本数: {total}")
-    print(f"[数据划分] 训练集:   {len(train_poems)}")
-    print(f"[数据划分] 验证集:   {len(val_poems)}")
-    print(f"[数据划分] 测试集:   {len(test_poems)}")
+    print(f"[数据划分] 总样本: {total} | 训练: {len(train_poems)} | 验证: {len(val_poems)} | 测试: {len(test_poems)}")
 
     assert len(train_poems) > 0, "[数据划分] 训练集为空!"
     assert len(val_poems) > 0, "[数据划分] 验证集为空!"
@@ -266,12 +238,8 @@ class PoemDataset(Dataset):
         super(PoemDataset, self).__init__()
         self.poems = poems
         self.stoi = stoi
-        self._shape_checked = False
 
         self.encoded_poems = [encode_poem(poem, stoi) for poem in poems]
-
-        print(f"\n[PoemDataset __init__] 数据集构建完成")
-        print(f"  [PoemDataset] 样本数: {len(self.encoded_poems)}")
 
     def __len__(self):
         return len(self.encoded_poems)
@@ -293,19 +261,30 @@ def build_dataloaders():
     """
     cache_dir = os.path.dirname(CLEAN_DATA_PATH)
     ensure_dir(cache_dir)
+    set_seed(RANDOM_SEED)
 
-    poems = load_and_clean_poems()
+    if os.path.exists(CLEAN_DATA_PATH) and os.path.exists(VOCAB_PATH):
+        print(f"[缓存] 命中，从缓存加载: {CLEAN_DATA_PATH}")
+        with open(CLEAN_DATA_PATH, "r", encoding="utf-8") as f:
+            poems = [line.rstrip("\n") for line in f]
+        vocab_data = load_json(VOCAB_PATH)
+        stoi = vocab_data["stoi"]
+        itos = vocab_data["itos"]
+        print(f"[缓存] 已加载 {len(poems)} 首诗, 词表大小 {len(itos)}")
+    else:
+        print(f"[缓存] 未命中，从头构建...")
+        poems = load_and_clean_poems()
+
+        train_poems_for_vocab, _, _ = split_dataset(poems)
+        stoi, itos = build_vocab(train_poems_for_vocab)
+
+        with open(CLEAN_DATA_PATH, "w", encoding="utf-8") as f:
+            for poem in poems:
+                f.write(poem + "\n")
+        save_json({"stoi": stoi, "itos": itos}, VOCAB_PATH)
+        print(f"[缓存] 已保存清洗结果到: {CLEAN_DATA_PATH}")
+
     train_poems, val_poems, test_poems = split_dataset(poems)
-
-    stoi, itos = build_vocab(train_poems)
-
-    with open(CLEAN_DATA_PATH, "w", encoding="utf-8") as f:
-        for poem in poems:
-            f.write(poem + "\n")
-    save_json({"stoi": stoi, "itos": itos}, VOCAB_PATH)
-
-    print(f"\n[缓存] 清洗后诗歌已保存到: {CLEAN_DATA_PATH}")
-    print(f"[缓存] 词表映射已保存到:     {VOCAB_PATH}")
 
     train_dataset = PoemDataset(train_poems, stoi)
     val_dataset = PoemDataset(val_poems, stoi)
@@ -315,17 +294,6 @@ def build_dataloaders():
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-    print("\n" + "=" * 55)
-    print(" [DataLoader 构建完成]")
-    print("=" * 55)
-    print(f"\n[DataLoader] Batch Size: {BATCH_SIZE}")
-    print(f"[DataLoader] train_loader batch 数: {len(train_loader)}")
-    print(f"[DataLoader] val_loader   batch 数: {len(val_loader)}")
-    print(f"[DataLoader] test_loader  batch 数: {len(test_loader)}")
-
-    sample_x, sample_y = train_dataset[0]
-    print(f"\n[DataLoader] 样本维度预览:")
-    print(f"  x shape: {tuple(sample_x.shape)}  (期望: (29,))")
-    print(f"  y shape: {tuple(sample_y.shape)}  (期望: (29,))")
+    print(f"\n[DataLoader] Batch={BATCH_SIZE} | train={len(train_loader)} batches | val={len(val_loader)} | test={len(test_loader)}")
 
     return train_loader, val_loader, test_loader, stoi, itos
