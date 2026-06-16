@@ -12,7 +12,7 @@ import matplotlib.ticker as ticker
 import numpy as np
 import torch
 
-from config import BEST_MODEL_SAVE_PATH, OUTPUT_DIR, RANDOM_SEED
+from config import BEST_MODEL_SAVE_PATH, FIGURES_DIR, RANDOM_SEED
 from utils import ensure_dir, set_seed
 
 logging.getLogger("matplotlib").setLevel(logging.ERROR)
@@ -53,10 +53,11 @@ def load_history(checkpoint_path):
     history = checkpoint["history"]
     best_epoch = checkpoint.get("epoch", len(history["train_loss"]))
     best_val_ppl = checkpoint.get("best_val_ppl", float("inf"))
-    return history, best_epoch, best_val_ppl
+    experiment_name = checkpoint.get("config", {}).get("experiment_name", "unknown")
+    return history, best_epoch, best_val_ppl, experiment_name
 
 
-def plot_loss_ppl_curve(history, best_epoch, save_dir):
+def plot_loss_ppl_curve(history, best_epoch, save_dir, experiment_name):
     epochs = range(1, len(history["train_loss"]) + 1)
 
     fig, ax1 = plt.subplots(figsize=(10, 5))
@@ -90,13 +91,13 @@ def plot_loss_ppl_curve(history, best_epoch, save_dir):
     plt.title("Training & Validation Loss / PPL")
     fig.tight_layout()
 
-    save_path = os.path.join(save_dir, "fig_loss_ppl.png")
+    save_path = os.path.join(save_dir, f"{experiment_name}_loss_ppl.png")
     fig.savefig(save_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"[图表] 已保存: {save_path}")
 
 
-def plot_lr_curve(history, best_epoch, save_dir):
+def plot_lr_curve(history, best_epoch, save_dir, experiment_name):
     epochs = range(1, len(history["train_loss"]) + 1)
 
     fig, ax1 = plt.subplots(figsize=(10, 5))
@@ -125,13 +126,13 @@ def plot_lr_curve(history, best_epoch, save_dir):
     plt.title("Loss & Learning Rate Decay")
     fig.tight_layout()
 
-    save_path = os.path.join(save_dir, "fig_lr_decay.png")
+    save_path = os.path.join(save_dir, f"{experiment_name}_lr_decay.png")
     fig.savefig(save_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"[图表] 已保存: {save_path}")
 
 
-def plot_grad_norm(history, save_dir):
+def plot_grad_norm(history, save_dir, experiment_name):
     grad_norms = history.get("grad_norm", [])
     if not grad_norms:
         print("[图表] history 中无 grad_norm 数据，跳过梯度范数图")
@@ -150,13 +151,13 @@ def plot_grad_norm(history, save_dir):
     plt.title("Average Gradient Norm per Epoch")
     fig.tight_layout()
 
-    save_path = os.path.join(save_dir, "fig_grad_norm.png")
+    save_path = os.path.join(save_dir, f"{experiment_name}_grad_norm.png")
     fig.savefig(save_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"[图表] 已保存: {save_path}")
 
 
-def plot_combined_dashboard(history, best_epoch, save_dir):
+def plot_combined_dashboard(history, best_epoch, save_dir, experiment_name):
     epochs = range(1, len(history["train_loss"]) + 1)
     n = len(epochs)
     lr_values = history.get("lr", [])
@@ -213,7 +214,7 @@ def plot_combined_dashboard(history, best_epoch, save_dir):
     fig.suptitle(f"Training Dashboard (Best Epoch = {best_epoch})", fontsize=14, fontweight="bold")
     fig.tight_layout()
 
-    save_path = os.path.join(save_dir, "fig_dashboard.png")
+    save_path = os.path.join(save_dir, f"{experiment_name}_dashboard.png")
     fig.savefig(save_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"[图表] 已保存: {save_path}")
@@ -226,20 +227,20 @@ def main():
         print("[提示] 请先运行 train.py 完成训练")
         return
 
-    charts_dir = os.path.join(OUTPUT_DIR, "charts")
-    ensure_dir(charts_dir)
+    figures_dir = FIGURES_DIR
+    ensure_dir(figures_dir)
 
-    history, best_epoch, best_val_ppl = load_history(checkpoint_path)
+    history, best_epoch, best_val_ppl, experiment_name = load_history(checkpoint_path)
     n_epochs = len(history["train_loss"])
     print(f"[数据] 加载 checkpoint: {checkpoint_path}")
-    print(f"[数据] 共 {n_epochs} 个 epoch, best_epoch={best_epoch}, best_val_ppl={best_val_ppl:.4f}")
+    print(f"[数据] 实验: {experiment_name} 共 {n_epochs} 个 epoch, best_epoch={best_epoch}, best_val_ppl={best_val_ppl:.4f}")
 
-    plot_loss_ppl_curve(history, best_epoch, charts_dir)
-    plot_lr_curve(history, best_epoch, charts_dir)
-    plot_grad_norm(history, charts_dir)
-    plot_combined_dashboard(history, best_epoch, charts_dir)
+    plot_loss_ppl_curve(history, best_epoch, figures_dir, experiment_name)
+    plot_lr_curve(history, best_epoch, figures_dir, experiment_name)
+    plot_grad_norm(history, figures_dir, experiment_name)
+    plot_combined_dashboard(history, best_epoch, figures_dir, experiment_name)
 
-    print(f"\n[完成] 共生成 4 张图表，保存在 {charts_dir}")
+    print(f"\n[完成] 共生成 4 张图表，保存在 {figures_dir}")
 
 
 if __name__ == "__main__":
