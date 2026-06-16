@@ -4,3 +4,6 @@ checkpoints/
 outputs/
 __pycache__/
 *.txt
+*.pdf
+*.docx
+*.zip
