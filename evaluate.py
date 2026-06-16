@@ -1,127 +1,168 @@
 import argparse
+import csv
 import os
 
 import torch
 
 from config import (
-    BASE_DIR,
     BEST_MODEL_SAVE_PATH,
-    DEFAULT_TEMPERATURE,
-    DEFAULT_TOP_K,
     METRICS_DIR,
     RANDOM_SEED,
     SAMPLES_DIR,
 )
 from data_utils import build_dataloaders
 from generate import (
+    build_rhyme_vocab_map,
     format_poem_for_display,
     generate_acrostic,
     generate_from_first_line,
     load_model_from_checkpoint,
 )
-from metrics import batch_format_compliance
+from metrics import batch_diversity, batch_rhyme_rate
 from trainer import evaluate_one_epoch
 from utils import configure_torch_runtime, ensure_dir, get_device, save_json, set_seed
 
 
-# ==========================================
-#  1. 基础测评主函数
-# ==========================================
-
 def parse_args():
-    """
-    解析命令行参数
-    """
-    parser = argparse.ArgumentParser(description="诗词生成基础测评入口")
+    parser = argparse.ArgumentParser(description="诗词生成采样参数横评")
     parser.add_argument("--checkpoint", type=str, default=BEST_MODEL_SAVE_PATH, help="checkpoint 路径")
-    parser.add_argument("--num_samples", type=int, default=5, help="每种条件生成多少组样例")
-    parser.add_argument("--strategy", type=str, default="temperature", choices=["temperature", "top_k"], help="采样策略")
-    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="temperature 参数")
-    parser.add_argument("--top_k", type=int, default=DEFAULT_TOP_K, help="top-k 参数")
+    parser.add_argument("--num_samples", type=int, default=30, help="每种条件生成样例数")
     parser.add_argument("--first_line", type=str, default="春风又绿江南岸", help="首句续写输入")
     parser.add_argument("--acrostic", type=str, default="春江花月", help="藏头诗输入")
     return parser.parse_args()
 
 
-def save_evaluation_summary(file_path, summary_dict):
-    """
-    保存基础测评结果为 JSON
-
-    参数:
-        file_path:     保存路径
-        summary_dict:  结果字典
-    """
-    save_json(summary_dict, file_path)
-    print(f"[输出] 测评结果已保存到: {file_path}")
-
-
-def run_batch_generation(model, stoi, itos, device, mode,
-                         text, num_samples, strategy, temperature, top_k):
-    """
-    批量生成样例并统计格式合规率
-
-    参数:
-        model:        已加载模型
-        stoi, itos:   词表映射
-        device:       计算设备
-        mode:         "first_line" 或 "acrostic"
-        text:         条件输入
-        num_samples:  生成样例数量
-        strategy:     采样策略
-        temperature:  temperature 参数
-        top_k:        top-k 参数
-
-    返回:
-        poems:    生成的诗歌列表
-        summary:  批量统计结果
-    """
+def run_one_batch(model, stoi, itos, device, mode, text, n, temp, topk, rhyme_map):
     poems = []
-
-    print(f"\n[批量生成] mode={mode}, text={text}, num_samples={num_samples}")
-
-    for idx in range(1, num_samples + 1):
-        print(f"  [生成样例 {idx}/{num_samples}]")
-
+    for _ in range(n):
         if mode == "first_line":
             poem = generate_from_first_line(
-                model=model,
-                first_line=text,
-                stoi=stoi,
-                itos=itos,
-                device=device,
-                strategy=strategy,
-                temperature=temperature,
-                top_k=top_k,
-            )
-        elif mode == "acrostic":
-            poem = generate_acrostic(
-                model=model,
-                head_chars=text,
-                stoi=stoi,
-                itos=itos,
-                device=device,
-                strategy=strategy,
-                temperature=temperature,
-                top_k=top_k,
+                model=model, first_line=text, stoi=stoi, itos=itos,
+                device=device, temperature=temp, top_k=topk, rhyme_map=rhyme_map,
             )
         else:
-            raise ValueError(f"[run_batch_generation] 不支持的 mode: {mode}")
-
+            poem = generate_acrostic(
+                model=model, head_chars=text, stoi=stoi, itos=itos,
+                device=device, temperature=temp, top_k=topk, rhyme_map=rhyme_map,
+            )
         poems.append(poem)
+    return poems
 
-    summary = batch_format_compliance(poems, expected_len=28)
-    print(f"\n[批量生成统计] 完全 28 字合规数: {summary['exact_match_count']}")
-    print(f"[批量生成统计] 格式合规率: {summary['exact_match_rate']:.4f}")
-    print(f"[批量生成统计] 平均 relaxed score: {summary['avg_relaxed_score']:.4f}")
 
-    return poems, summary
+def evaluate_one_config(model, stoi_ckpt, itos_ckpt, device, rhyme_map,
+                        temperature, top_k, first_line, acrostic, num_samples):
+    fl_free = run_one_batch(model, stoi_ckpt, itos_ckpt, device,
+                            "first_line", first_line, num_samples, temperature, top_k, None)
+    ac_free = run_one_batch(model, stoi_ckpt, itos_ckpt, device,
+                            "acrostic", acrostic, num_samples, temperature, top_k, None)
 
+    fl_guided = run_one_batch(model, stoi_ckpt, itos_ckpt, device,
+                              "first_line", first_line, num_samples, temperature, top_k, rhyme_map)
+    ac_guided = run_one_batch(model, stoi_ckpt, itos_ckpt, device,
+                              "acrostic", acrostic, num_samples, temperature, top_k, rhyme_map)
+
+    fl_div = batch_diversity(fl_free)
+    ac_div = batch_diversity(ac_free)
+
+    fl_rhyme_free = batch_rhyme_rate(fl_free)
+    ac_rhyme_free = batch_rhyme_rate(ac_free)
+    fl_rhyme_g = batch_rhyme_rate(fl_guided)
+    ac_rhyme_g = batch_rhyme_rate(ac_guided)
+
+    fl_poems_display = [format_poem_for_display(p) for p in fl_free]
+    ac_poems_display = [format_poem_for_display(p) for p in ac_free]
+
+    return {
+        "temperature": temperature,
+        "top_k": top_k,
+        "fl_dens": fl_div["inter_dens"],
+        "fl_rpt": fl_div["repeat_pct"],
+        "fl_uniq": fl_div["uniq_rate"],
+        "ac_dens": ac_div["inter_dens"],
+        "ac_rpt": ac_div["repeat_pct"],
+        "ac_uniq": ac_div["uniq_rate"],
+        "fl_rhyme_free24": fl_rhyme_free["rate_2_4"],
+        "fl_rhyme_free124": fl_rhyme_free["rate_1_2_4"],
+        "fl_rhyme_g24": fl_rhyme_g["rate_2_4"],
+        "fl_rhyme_g124": fl_rhyme_g["rate_1_2_4"],
+        "ac_rhyme_free24": ac_rhyme_free["rate_2_4"],
+        "ac_rhyme_free124": ac_rhyme_free["rate_1_2_4"],
+        "ac_rhyme_g24": ac_rhyme_g["rate_2_4"],
+        "ac_rhyme_g124": ac_rhyme_g["rate_1_2_4"],
+        "first_line_poems": fl_poems_display,
+        "acrostic_poems": ac_poems_display,
+    }
+
+
+# ========================================================================
+#  CSV
+# ========================================================================
+
+CSV_COLUMNS = [
+    "temperature", "top_k",
+    "fl_dens", "fl_rpt", "fl_uniq",
+    "ac_dens", "ac_rpt", "ac_uniq",
+    "fl_rhyme_free24", "fl_rhyme_free124",
+    "fl_rhyme_g24", "fl_rhyme_g124",
+    "ac_rhyme_free24", "ac_rhyme_free124",
+    "ac_rhyme_g24", "ac_rhyme_g124",
+]
+
+CSV_HEADERS = [
+    "Temperature", "Top-K",
+    "首句-密度", "首句-重复度%", "首句-去重率",
+    "藏头-密度", "藏头-重复度%", "藏头-去重率",
+    "首句-自由2-4押韵", "首句-自由1-2-4押韵",
+    "首句-引导2-4押韵", "首句-引导1-2-4押韵",
+    "藏头-自由2-4押韵", "藏头-自由1-2-4押韵",
+    "藏头-引导2-4押韵", "藏头-引导1-2-4押韵",
+]
+
+
+def save_csv(file_path, results):
+    with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(CSV_HEADERS)
+        for r in results:
+            writer.writerow([r.get(c, "") for c in CSV_COLUMNS])
+
+
+# ========================================================================
+#  对比组
+# ========================================================================
+
+TEMPERATURE_GRID = [
+    {"temperature": 0.6, "top_k": 0},
+    {"temperature": 0.8, "top_k": 0},
+    {"temperature": 1.0, "top_k": 0},
+    {"temperature": 1.2, "top_k": 0},
+]
+
+TOPK_GRID = [
+    {"temperature": 0.8, "top_k": 5},
+    {"temperature": 0.8, "top_k": 10},
+    {"temperature": 0.8, "top_k": 20},
+    {"temperature": 1.0, "top_k": 5},
+    {"temperature": 1.0, "top_k": 10},
+    {"temperature": 1.0, "top_k": 20},
+]
+
+FULL_GRID = TEMPERATURE_GRID + TOPK_GRID
+
+
+def _label(r):
+    t, k = r["temperature"], r["top_k"]
+    return f"t={t:.1f} 全表" if k == 0 else f"t={t:.1f} k={k}"
+
+
+# ========================================================================
+#  主函数
+# ========================================================================
 
 def main():
-    print("=" * 60)
-    print(" 诗词生成基础测评")
-    print(" 测试集 PPL + 批量生成 + 格式合规率")
-    print("=" * 60)
+    print("=" * 50)
+    print(" 采样参数横评 temperature × top-k + 韵律")
+    print("=" * 50)
 
     args = parse_args()
     configure_torch_runtime()
@@ -129,156 +170,93 @@ def main():
     ensure_dir(METRICS_DIR)
     ensure_dir(SAMPLES_DIR)
 
-    # ==========================================
-    #  1.1 检测计算设备
-    # ==========================================
-    print("\n" + "-" * 55)
-    print(" 1. 检测计算设备")
-    print("-" * 55)
-
     device = get_device()
-    print(f"使用设备: {device}")
     if device == "cuda":
-        print(f"  GPU 型号: {torch.cuda.get_device_name(0)}")
-        print(f"  CUDA 版本: {torch.version.cuda}")
+        print(f"[设备] CUDA GPU {torch.cuda.get_device_name(0)} PyTorch {torch.__version__}")
     else:
-        print(f"  未检测到 GPU，使用 CPU 进行评测")
-    print(f"  PyTorch 版本: {torch.__version__}")
-    print(f"  项目目录: {BASE_DIR}")
+        print(f"[设备] CPU PyTorch {torch.__version__}")
 
-    # ==========================================
-    #  1.2 重建数据集划分
-    # ==========================================
-    print("\n" + "-" * 55)
-    print(" 2. 重建数据集与 DataLoader")
-    print("-" * 55)
-
-    train_loader, val_loader, test_loader, stoi_data, itos_data = build_dataloaders()
-
-    # ==========================================
-    #  1.3 加载最佳模型
-    # ==========================================
-    print("\n" + "-" * 55)
-    print(" 3. 加载最佳模型 checkpoint")
-    print("-" * 55)
-
+    loaders = build_dataloaders()
+    _, _, test_loader, stoi_data, itos_data = loaders
     model, checkpoint, stoi_ckpt, itos_ckpt = load_model_from_checkpoint(args.checkpoint, device)
+    assert len(itos_data) == len(itos_ckpt), "数据集词表大小与 checkpoint 不一致"
 
-    print(f"\n[一致性检查] DataLoader 词表大小: {len(itos_data)}")
-    print(f"[一致性检查] Checkpoint 词表大小: {len(itos_ckpt)}")
-    assert len(itos_data) == len(itos_ckpt), \
-        "[一致性检查] 数据集重建得到的词表大小与 checkpoint 不一致!"
+    rhyme_map = build_rhyme_vocab_map(itos_ckpt)
+    print(f"[韵律] 韵母种类 {len(rhyme_map)}  pypinyin {'OK' if rhyme_map else 'MISSING'}")
 
-    # ==========================================
-    #  1.4 测试集 PPL 评测
-    # ==========================================
-    print("\n" + "-" * 55)
-    print(" 4. 测试集 PPL 评测")
-    print("-" * 55)
+    _, test_ppl = evaluate_one_epoch(model, test_loader, device)
+    print(f"[模型] Test PPL {test_ppl:.1f}")
 
-    train_loss, train_ppl = evaluate_one_epoch(model, train_loader, device)
-    val_loss, val_ppl = evaluate_one_epoch(model, val_loader, device)
-    test_loss, test_ppl = evaluate_one_epoch(model, test_loader, device)
+    results = []
+    for idx, cfg in enumerate(FULL_GRID, start=1):
+        t, k = cfg["temperature"], cfg["top_k"]
+        print(f"[{idx}/{len(FULL_GRID)}] {_label({'temperature': t, 'top_k': k})} ...",
+              end=" ", flush=True)
 
-    print(f"\n{'=' * 48}")
-    print(" 基础测评：数据集级指标")
-    print(f"{'=' * 48}")
-    print(f"  Train Loss: {train_loss:.6f},  Train PPL: {train_ppl:.4f}")
-    print(f"  Val   Loss: {val_loss:.6f},  Val   PPL: {val_ppl:.4f}")
-    print(f"  Test  Loss: {test_loss:.6f},  Test  PPL: {test_ppl:.4f}")
-    print(f"{'=' * 48}")
+        result = evaluate_one_config(
+            model, stoi_ckpt, itos_ckpt, device, rhyme_map,
+            temperature=t, top_k=k,
+            first_line=args.first_line, acrostic=args.acrostic,
+            num_samples=args.num_samples,
+        )
+        results.append(result)
+        print("OK")
 
-    # ==========================================
-    #  1.5 首句续写批量生成
-    # ==========================================
-    print("\n" + "-" * 55)
-    print(" 5. 首句续写基础测评")
-    print("-" * 55)
+    # ====== 表1: 采样策略对比 自由生成 ======
+    print(f"\n{'=' * 80}")
+    print(" 表1: 采样策略对比 — 自由生成 无韵律引导")
+    print(f"{'=' * 80}")
+    print(f"  ← 密度和重复度越低越多样 →")
+    print(f"  {'t':>4}  {'top_k':>5}  {'首句密度':>8}  {'藏头密度':>8}  {'首句重复%':>9}  {'藏头重复%':>9}  {'首句去重':>8}")
+    print(f"  {'─' * 65}")
+    for r in results:
+        t_label = f"t={r['temperature']:.1f}"
+        k_label = "全" if r["top_k"] == 0 else str(r["top_k"])
+        print(f"  {t_label:>4}  {k_label:>5}  {r['fl_dens']:>8.3f}  {r['ac_dens']:>8.3f}  "
+              f"{r['fl_rpt']:>8.1f}  {r['ac_rpt']:>8.1f}  {r['fl_uniq']:>7.2f}")
+    print(f"{'=' * 80}")
 
-    first_line_poems, first_line_summary = run_batch_generation(
-        model=model,
-        stoi=stoi_ckpt,
-        itos=itos_ckpt,
-        device=device,
-        mode="first_line",
-        text=args.first_line,
-        num_samples=args.num_samples,
-        strategy=args.strategy,
-        temperature=args.temperature,
-        top_k=args.top_k,
-    )
+    # ====== 表2: 韵律引导对比 ======
+    print(f"\n{'=' * 80}")
+    print(" 表2: 韵律引导对比 — 无引导 vs 有引导 2-4句押韵")
+    print(f"{'=' * 80}")
+    print(f"  {'t':>4}  {'top_k':>5}  {'首-无引导':>10}  {'首-有引导':>10}  {'藏-无引导':>10}  {'藏-有引导':>10}  {'平均提升':>8}")
+    print(f"  {'─' * 65}")
+    for r in results:
+        t_label = f"t={r['temperature']:.1f}"
+        k_label = "全" if r["top_k"] == 0 else str(r["top_k"])
+        avg_imp = (r["fl_rhyme_g24"] - r["fl_rhyme_free24"] + r["ac_rhyme_g24"] - r["ac_rhyme_free24"]) / 2
+        print(f"  {t_label:>4}  {k_label:>5}  {r['fl_rhyme_free24']:>9.1%}  {r['fl_rhyme_g24']:>9.1%}  "
+              f"{r['ac_rhyme_free24']:>9.1%}  {r['ac_rhyme_g24']:>9.1%}  {avg_imp:>+7.1%}")
+    print(f"{'=' * 80}")
 
-    # ==========================================
-    #  1.6 藏头诗批量生成
-    # ==========================================
-    print("\n" + "-" * 55)
-    print(" 6. 藏头诗基础测评")
-    print("-" * 55)
-
-    acrostic_poems, acrostic_summary = run_batch_generation(
-        model=model,
-        stoi=stoi_ckpt,
-        itos=itos_ckpt,
-        device=device,
-        mode="acrostic",
-        text=args.acrostic,
-        num_samples=args.num_samples,
-        strategy=args.strategy,
-        temperature=args.temperature,
-        top_k=args.top_k,
-    )
-
-    # ==========================================
-    #  1.7 汇总并保存测评结果
-    # ==========================================
-    print("\n" + "-" * 55)
-    print(" 7. 汇总并保存测评结果")
-    print("-" * 55)
-
-    result_summary = {
+    # ====== 保存 ======
+    json_path = os.path.join(METRICS_DIR, "comparison_results.json")
+    save_json({
         "checkpoint_path": args.checkpoint,
         "checkpoint_epoch": checkpoint.get("epoch", None),
         "best_val_ppl": checkpoint.get("best_val_ppl", None),
-        "evaluation_config": {
-            "strategy": args.strategy,
-            "temperature": args.temperature,
-            "top_k": args.top_k,
-            "num_samples": args.num_samples,
-            "first_line": args.first_line,
-            "acrostic": args.acrostic,
-        },
-        "dataset_metrics": {
-            "train_loss": train_loss,
-            "train_ppl": train_ppl,
-            "val_loss": val_loss,
-            "val_ppl": val_ppl,
-            "test_loss": test_loss,
-            "test_ppl": test_ppl,
-        },
-        "generation_metrics": {
-            "first_line_summary": first_line_summary,
-            "acrostic_summary": acrostic_summary,
-        },
-        "generation_examples": {
-            "first_line_poems": [format_poem_for_display(poem) for poem in first_line_poems],
-            "acrostic_poems": [format_poem_for_display(poem) for poem in acrostic_poems],
-        },
-    }
+        "test_ppl": test_ppl,
+        "num_samples": args.num_samples,
+        "first_line": args.first_line,
+        "acrostic": args.acrostic,
+        "results": results,
+    }, json_path)
 
-    result_file_name = (
-        f"basic_eval_{args.strategy}_"
-        f"t{str(args.temperature).replace('.', '')}_"
-        f"k{args.top_k}.json"
-    )
-    result_file_path = os.path.join(METRICS_DIR, result_file_name)
-    save_evaluation_summary(result_file_path, result_summary)
+    csv_path = os.path.join(METRICS_DIR, "comparison_results.csv")
+    save_csv(csv_path, results)
 
-    print(f"\n[输出] 样例目录: {SAMPLES_DIR}")
-    print(f"[输出] 指标目录: {METRICS_DIR}")
+    # ====== 推荐 ======
+    _score = lambda r: r["fl_dens"] + r["ac_dens"] + r["fl_rpt"] / 100 + r["ac_rpt"] / 100
+    best_div = min(results, key=_score)
+    best_rhyme = max(results, key=lambda r: (r["fl_rhyme_g24"] + r["ac_rhyme_g24"]) / 2)
+    print(f"\n推荐: 多样性 t={best_div['temperature']:.1f} k={best_div['top_k']}  "
+          f"| 押韵 t={best_rhyme['temperature']:.1f} k={best_rhyme['top_k']} "
+          f"引导后 fl={best_rhyme['fl_rhyme_g24']:.0%} ac={best_rhyme['ac_rhyme_g24']:.0%}")
 
-    print("\n" + "=" * 60)
-    print(" 诗词生成基础测评完成")
-    print("=" * 60)
+    print(f"\n[JSON] {json_path}")
+    print(f"[CSV]  {csv_path}")
+    print("测评完成")
 
 
 if __name__ == "__main__":
